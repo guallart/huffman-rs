@@ -99,6 +99,39 @@ fn compute_frequencies(message: &[u8]) -> Vec<(u8, usize)> {
         .collect()
 }
 
+fn encode(data: &[u8], table: &HashMap<u8, BitCode>) -> (Vec<u8>, usize) {
+    let mut encoded_bytes = Vec::with_capacity(data.len() / 2);
+
+    let mut bit_accumulator: u64 = 0;
+    let mut bits_in_accumulator: u32 = 0;
+    let mut total_bits: usize = 0;
+
+    for &byte in data {
+        if let Some(code) = table.get(&byte) {
+            bit_accumulator = (bit_accumulator << code.length) | (code.bits as u64);
+            bits_in_accumulator += code.length;
+            total_bits += code.length as usize;
+
+            // Extract bytes from accumulator
+            while bits_in_accumulator >= 8 {
+                bits_in_accumulator -= 8;
+                let byte_to_write = (bit_accumulator >> bits_in_accumulator) as u8;
+                encoded_bytes.push(byte_to_write);
+
+                // Clean written bits
+                bit_accumulator &= (1 << bits_in_accumulator) - 1;
+            }
+        }
+    }
+
+    // Write leftover bits in accumulator
+    if bits_in_accumulator > 0 {
+        let byte_to_write = (bit_accumulator << (8 - bits_in_accumulator)) as u8;
+        encoded_bytes.push(byte_to_write);
+    }
+
+    (encoded_bytes, total_bits)
+}
 
 #[cfg(test)]
 mod tests {
@@ -145,9 +178,9 @@ mod tests {
         let mut table = HashMap::new();
         build_table(&root.node, 0, 0, &mut table);
 
-        for (&ch, &bit_code) in &table {
-            println!("'{}' -> {}", ch as char, bit_code);
-        }
+        //for (&ch, &bit_code) in &table {
+        //    println!("'{}' -> {}", ch as char, bit_code);
+        //}
 
         assert_eq!(table.len(), 5);
 
@@ -162,5 +195,29 @@ mod tests {
         assert_eq!(format!("{}", table.get(&b'c').unwrap()), "110");
         assert_eq!(format!("{}", table.get(&b'd').unwrap()), "1110");
         assert_eq!(format!("{}", table.get(&b'e').unwrap()), "1111");
+    }
+
+    #[test]
+    fn test_encode() {
+        let message = get_message();
+        let freqs = compute_frequencies(&message);
+
+        let root_opt = build_tree(&freqs);
+        assert!(root_opt.is_some());
+
+        let root = root_opt.unwrap();
+
+        let mut table = HashMap::new();
+        build_table(&root.node, 0, 0, &mut table);
+
+        let (encoded_bytes, total_bits) = encode(&message, &table);
+
+        let encoded_str = encoded_bytes
+            .iter()
+            .map(|b| b.to_string())
+            .collect::<Vec<String>>()
+            .join(", ");
+
+        println!("{}", encoded_str);
     }
 }
