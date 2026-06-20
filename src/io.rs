@@ -292,12 +292,14 @@ pub fn encode_file(input_path: &str) -> io::Result<()> {
 
     let mut out_file = File::create(&output_path)?;
     out_file.write_all(&output)?;
+    let compression = (output.len() as f32) / (file.data.len() as f32) * 100.0;
 
-    println!("Encoded: {} -> {} ({} bytes -> {} bytes)",
+    println!("Encoded: {} -> {} ({} bytes -> {} bytes, {:.1} %)",
         input_path,
         output_path.display(),
         file.data.len(),
         output.len(),
+        compression
     );
 
     Ok(())
