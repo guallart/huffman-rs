@@ -25,14 +25,13 @@ The encoder and decoder are split into two layers:
 
 ## Archive format
 
-```
-┌─────────────┬──────────────────┬───────────────────┬──────────────┬───────────────────┬──────────────────────┬──────────────┐
-│ "HUFFMAN"   │ name length (u64)│ original file name │ tree bit len │ serialized tree    │ data bit len / count  │ packed data  │
-│  7 bytes    │   8 bytes        │   variable          │  (u64)       │   variable          │   (2 × u64)           │   variable   │
-└─────────────┴──────────────────┴───────────────────┴──────────────┴───────────────────┴──────────────────────┴──────────────┘
-```
-
-All length and count fields are stored as fixed-width, little-endian `u64`s (rather than the host's native `usize`), so an archive produced on one machine decodes correctly on another regardless of platform word size.
+- Magic Number (7 bytes): The literal string "HUFFMAN" to identify the file type.
+- Name Length (8 bytes / u64): The length of the original file name in bytes.
+- Original File Name (variable): The actual name of the original file.
+- Tree Bit Length (8 bytes / u64): The length of the serialized Huffman tree in bits.
+- Serialized Tree (variable): The structure of the Huffman tree used for decoding.
+- Data Bit Len / Count (16 bytes / 2 × u64): Two u64 values specifying the exact length/count of the packed data bits.
+- Packed Data (variable): The actual Huffman-compressed data bits.
 
 ## Usage
 
