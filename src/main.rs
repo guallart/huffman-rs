@@ -4,7 +4,7 @@ mod huffman;
 mod io;
 
 #[derive(Parser)]
-#[command(name = "huff", about = "Huffman file compressor", version)]
+#[command(name = "huff", about = "A file compressor based on Huffman coding", version)]
 struct Cli {
     #[command(subcommand)]
     command: Command,
@@ -12,12 +12,12 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Compress a file
+    /// Compress a file into a .huff archive
     Encode {
         /// Path to the file to compress
         file: String,
     },
-    /// Decompress a .huff file
+    /// Decompress a .huff archive back to its original file
     Decode {
         /// Path to the .huff file to decompress
         file: String,

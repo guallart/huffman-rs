@@ -1,7 +1,17 @@
 [package]
-name = "huffman-rs"
+name = "huff"
 version = "0.1.0"
-edition = "2024"
-
+edition = "2021"
+description = "A command-line file compressor built on Huffman coding"
+license = "MIT"
+readme = "README.md"
+keywords = ["huffman", "compression", "cli"]
+categories = ["command-line-utilities", "compression"]
+ 
 [dependencies]
-clap = { version = "4.6.1", features = ["derive"] }
+clap = { version = "4", features = ["derive"] }
+ 
+[profile.release]
+opt-level = 3
+lto = true
+

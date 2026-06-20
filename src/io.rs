@@ -1,56 +1,69 @@
+//! Reads files from disk, drives the Huffman encode/decode pipeline, and
+//! handles the `.huff` archive format: a small header (original file name,
+//! the serialized Huffman tree, and bit counts) followed by the packed data.
+
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::Path;
-use std::collections::HashMap;
-use crate::huffman::{compute_frequencies, build_tree, build_table, encode, decode};
-use crate::huffman::{Node, HuffmanNode};
+
+use crate::huffman::{build_table, build_tree, compute_frequencies, decode, encode};
+use crate::huffman::{HuffmanNode, Node};
 
 const SIGNATURE: &[u8; 7] = b"HUFFMAN";
 
+/// All length/count fields in the header are stored as fixed-width u64s,
+/// regardless of the host's native `usize` width, so that an archive
+/// produced on one platform (e.g. 64-bit) can still be decoded on another
+/// (e.g. 32-bit).
+const U64_SIZE: usize = std::mem::size_of::<u64>();
+
 struct FileData {
-    pub name: String,
-    pub extension: String,
-    pub data: Vec<u8>,
+    name: String,
+    extension: String,
+    data: Vec<u8>,
 }
 
-fn read_file(file_path: &str) -> FileData {
+fn read_file(file_path: &str) -> io::Result<FileData> {
     let data = fs::read(file_path)
-        .expect(&format!("Could not open the file {}", file_path));
+        .map_err(|e| io::Error::new(e.kind(), format!("could not open '{}': {}", file_path, e)))?;
 
     let path = Path::new(file_path);
 
-    let name = path.file_stem()
+    let name = path
+        .file_stem()
         .and_then(|os_str| os_str.to_str())
-        .expect(&format!("Invalid file name {}", file_path))
+        .ok_or_else(|| invalid_data(format!("could not determine a file name for '{}'", file_path)))?
         .to_string();
 
-    let extension = path.extension()
+    let extension = path
+        .extension()
         .and_then(|os_str| os_str.to_str())
         .unwrap_or("")
         .to_string();
 
-    FileData {
-        name,
-        extension,
-        data,
-    }
+    Ok(FileData { name, extension, data })
+}
+
+fn invalid_data(message: impl Into<String>) -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, message.into())
 }
 
 struct Header {
-    original_name_length: usize,
     original_name: String,
-    tree_bit_count: usize,
+    tree_bit_count: u64,
     tree: Vec<u8>,
-    data_bit_count: usize,
-    original_byte_count: usize,
+    data_bit_count: u64,
+    original_byte_count: u64,
 }
 
 impl Header {
     fn serialize(self) -> Vec<u8> {
         let mut bytes = SIGNATURE.to_vec();
 
-        bytes.extend_from_slice(&self.original_name_length.to_le_bytes());
-        bytes.extend_from_slice(self.original_name.as_bytes());
+        let name_bytes = self.original_name.as_bytes();
+        bytes.extend_from_slice(&(name_bytes.len() as u64).to_le_bytes());
+        bytes.extend_from_slice(name_bytes);
 
         bytes.extend_from_slice(&self.tree_bit_count.to_le_bytes());
         bytes.extend_from_slice(&self.tree);
@@ -62,78 +75,39 @@ impl Header {
     }
 
     fn deserialize(bytes: &[u8]) -> Result<Header, String> {
-        let usize_size = std::mem::size_of::<usize>();
         let mut cursor = bytes;
 
-        // Signature
         if cursor.len() < SIGNATURE.len() {
-            return Err("File is not big enough to contain the signature.".to_string());
+            return Err("file is too short to contain a valid signature".to_string());
         }
         let (signature_bytes, rest) = cursor.split_at(SIGNATURE.len());
         if signature_bytes != SIGNATURE {
-            return Err("Invalid file signature.".to_string());
+            return Err("invalid signature — this doesn't look like a .huff archive".to_string());
         }
         cursor = rest;
 
-        // Original name length
-        if cursor.len() < usize_size {
-            return Err("File is not big enough to read original_name_length.".to_string());
-        }
-        let (len_bytes, rest) = cursor.split_at(usize_size);
-        let original_name_length = usize::from_le_bytes(
-            len_bytes.try_into().map_err(|_| "Error parsing original_name_length.")?
-        );
-        cursor = rest;
-
-        // Original name
+        let original_name_length = read_u64(&mut cursor, "original_name_length")? as usize;
         if cursor.len() < original_name_length {
-            return Err("File is not big enough to read original_name.".to_string());
+            return Err("file is too short to read the original file name".to_string());
         }
         let (name_bytes, rest) = cursor.split_at(original_name_length);
         let original_name = String::from_utf8(name_bytes.to_vec())
-            .map_err(|e| format!("Invalid UTF-8 in file name: {}", e))?;
+            .map_err(|e| format!("invalid UTF-8 in stored file name: {}", e))?;
         cursor = rest;
 
-        // Tree bit count
-        if cursor.len() < usize_size {
-            return Err("File is not big enough to read tree_bit_count.".to_string());
-        }
-        let (tree_bits_bytes, rest) = cursor.split_at(usize_size);
-        let tree_bit_count = usize::from_le_bytes(
-            tree_bits_bytes.try_into().map_err(|_| "Error parsing tree_bit_count.")?
-        );
-        cursor = rest;
-
-        // Tree bytes
-        let tree_bytes_len = (tree_bit_count + 7) / 8;
+        let tree_bit_count = read_u64(&mut cursor, "tree_bit_count")?;
+        let tree_bytes_len = (tree_bit_count as usize).div_ceil(8);
         if cursor.len() < tree_bytes_len {
-            return Err("File is not big enough to read tree bytes.".to_string());
+            return Err("file is too short to read the Huffman tree".to_string());
         }
         let (tree_bytes, rest) = cursor.split_at(tree_bytes_len);
         let tree = tree_bytes.to_vec();
         cursor = rest;
 
-        // Data bit count
-        if cursor.len() < usize_size {
-            return Err("File is not big enough to read data_bit_count.".to_string());
-        }
-        let (data_bits_bytes, rest) = cursor.split_at(usize_size);
-        let data_bit_count = usize::from_le_bytes(
-            data_bits_bytes.try_into().map_err(|_| "Error parsing data_bit_count.")?
-        );
-        cursor = rest;
-
-        // Original byte count
-        if cursor.len() < usize_size {
-            return Err("File is not big enough to read original_byte_count.".to_string());
-        }
-        let (orig_bytes, _rest) = cursor.split_at(usize_size);
-        let original_byte_count = usize::from_le_bytes(
-            orig_bytes.try_into().map_err(|_| "Error parsing original_byte_count.")?
-        );
+        let data_bit_count = read_u64(&mut cursor, "data_bit_count")?;
+        let original_byte_count = read_u64(&mut cursor, "original_byte_count")?;
 
         Ok(Header {
-            original_name_length,
             original_name,
             tree_bit_count,
             tree,
@@ -141,6 +115,36 @@ impl Header {
             original_byte_count,
         })
     }
+
+    /// Total size in bytes of the serialized header (signature + all
+    /// fixed-width fields + variable-length name and tree), used to find
+    /// where the encoded payload begins.
+    fn byte_len(&self) -> usize {
+        SIGNATURE.len()
+            + U64_SIZE
+            + self.original_name.len()
+            + U64_SIZE
+            + self.tree.len()
+            + U64_SIZE
+            + U64_SIZE
+    }
+}
+
+/// Reads a little-endian `u64` off the front of `cursor`, advancing it past
+/// the bytes consumed. Centralizing this avoids repeating the same
+/// bounds-check-and-parse logic for every header field.
+fn read_u64(cursor: &mut &[u8], field_name: &str) -> Result<u64, String> {
+    if cursor.len() < U64_SIZE {
+        return Err(format!("file is too short to read '{}'", field_name));
+    }
+    let (value_bytes, rest) = cursor.split_at(U64_SIZE);
+    let value = u64::from_le_bytes(
+        value_bytes
+            .try_into()
+            .map_err(|_| format!("could not parse '{}'", field_name))?,
+    );
+    *cursor = rest;
+    Ok(value)
 }
 
 struct BitWriter {
@@ -171,6 +175,8 @@ impl BitWriter {
         }
     }
 
+    /// Flushes any partial trailing byte (padded with zero bits) and
+    /// returns the packed bytes along with the exact bit count written.
     fn flush(mut self) -> (Vec<u8>, usize) {
         let mut total_bits = self.bytes.len() * 8;
 
@@ -234,6 +240,9 @@ impl BitReader {
     }
 }
 
+/// Rebuilds a `Node` tree from its serialized bit stream. The `frequency`
+/// fields on intermediate `HuffmanNode`s are irrelevant here (the tree
+/// shape carries everything needed for decoding) so they're left at 0.
 fn deserialize_node(reader: &mut BitReader) -> Option<Node> {
     let bit = reader.read_bit()?;
 
@@ -252,11 +261,11 @@ fn deserialize_node(reader: &mut BitReader) -> Option<Node> {
 }
 
 pub fn encode_file(input_path: &str) -> io::Result<()> {
-    let file = read_file(input_path);
+    let file = read_file(input_path)?;
 
     let frequencies = compute_frequencies(&file.data);
     let root = build_tree(&frequencies)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Empty file. Nothing to encode."))?;
+        .ok_or_else(|| invalid_data("the input file is empty — nothing to encode"))?;
 
     let mut table = HashMap::new();
     build_table(&root.node, 0, 0, &mut table);
@@ -274,12 +283,11 @@ pub fn encode_file(input_path: &str) -> io::Result<()> {
     };
 
     let header = Header {
-        original_name_length: original_name.len(),
         original_name,
-        tree_bit_count,
+        tree_bit_count: tree_bit_count as u64,
         tree: tree_bytes,
-        data_bit_count,
-        original_byte_count: file.data.len(),
+        data_bit_count: data_bit_count as u64,
+        original_byte_count: file.data.len() as u64,
     };
 
     let mut output = header.serialize();
@@ -292,9 +300,10 @@ pub fn encode_file(input_path: &str) -> io::Result<()> {
 
     let mut out_file = File::create(&output_path)?;
     out_file.write_all(&output)?;
-    let compression = (output.len() as f32) / (file.data.len() as f32) * 100.0;
 
-    println!("Encoded: {} -> {} ({} bytes -> {} bytes, {:.1} %)",
+    let compression = (output.len() as f32) / (file.data.len() as f32) * 100.0;
+    println!(
+        "Encoded: {} -> {} ({} bytes -> {} bytes, {:.1}%)",
         input_path,
         output_path.display(),
         file.data.len(),
@@ -307,58 +316,49 @@ pub fn encode_file(input_path: &str) -> io::Result<()> {
 
 pub fn decode_file(input_path: &str) -> io::Result<()> {
     let raw = fs::read(input_path)
-        .map_err(|e| io::Error::new(e.kind(), format!("Cannot open {}: {}", input_path, e)))?;
+        .map_err(|e| io::Error::new(e.kind(), format!("could not open '{}': {}", input_path, e)))?;
 
-    let header = Header::deserialize(&raw)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let header = Header::deserialize(&raw).map_err(invalid_data)?;
 
     let mut tree_reader = BitReader::new(header.tree.clone());
     let root_node = deserialize_node(&mut tree_reader)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "Corrupt Huffman tree in header."))?;
+        .ok_or_else(|| invalid_data("corrupt Huffman tree in header"))?;
 
-    let root = HuffmanNode { node: root_node, frequency: header.original_byte_count };
+    // For the single-distinct-byte edge case, `decode` reads the repeat
+    // count straight off `frequency` instead of walking a (nonexistent)
+    // path through internal nodes — see huffman::decode.
+    let root = HuffmanNode { node: root_node, frequency: header.original_byte_count as usize };
 
-    let usize_size = std::mem::size_of::<usize>();
-    let tree_bytes_len = (header.tree_bit_count + 7) / 8;
-    let header_size = SIGNATURE.len()
-        + usize_size                  // original_name_length
-        + header.original_name_length // name bytes
-        + usize_size                  // tree_bit_count
-        + tree_bytes_len              // tree bytes
-        + usize_size                  // data_bit_count
-        + usize_size;                 // original_byte_count
-
+    let header_size = header.byte_len();
     if raw.len() < header_size {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "File too short — missing payload."));
+        return Err(invalid_data("file is too short — missing payload"));
     }
     let payload = &raw[header_size..];
 
-    let decoded = decode(payload, header.data_bit_count, &root);
+    let decoded = decode(payload, header.data_bit_count as usize, &root);
 
-    if decoded.len() != header.original_byte_count {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidData,
-            format!(
-                "Decoded size mismatch: expected {} bytes, got {}.",
-                header.original_byte_count,
-                decoded.len()
-            ),
-        ));
+    if decoded.len() as u64 != header.original_byte_count {
+        return Err(invalid_data(format!(
+            "decoded size mismatch: expected {} bytes, got {} — the archive may be corrupt",
+            header.original_byte_count,
+            decoded.len()
+        )));
     }
 
-    let input_dir = Path::new(input_path)
-        .parent()
-        .unwrap_or(Path::new("."));
-    let output_path = input_dir.join(&header.original_name);
+    let input_dir = Path::new(input_path).parent().unwrap_or(Path::new("."));
+
+    // Only take the file name component of whatever was stored in the
+    // header, so a crafted archive can't write outside `input_dir` via a
+    // path like "../../etc/passwd".
+    let safe_name = Path::new(&header.original_name)
+        .file_name()
+        .ok_or_else(|| invalid_data("archive header contains an invalid output file name"))?;
+    let output_path = input_dir.join(safe_name);
 
     let mut out_file = File::create(&output_path)?;
     out_file.write_all(&decoded)?;
 
-    println!("Decoded: {} -> {} ({} bytes)",
-        input_path,
-        output_path.display(),
-        decoded.len(),
-    );
+    println!("Decoded: {} -> {} ({} bytes)", input_path, output_path.display(), decoded.len());
 
     Ok(())
 }
