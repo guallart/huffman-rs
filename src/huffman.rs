@@ -3,15 +3,15 @@ use std::collections::{BinaryHeap, HashMap};
 use std::fmt;
 
 #[derive(Debug, Eq, PartialEq)]
-enum Node {
+pub enum Node {
     Internal(Box<HuffmanNode>, Box<HuffmanNode>),
     Leaf(u8)
 }
 
 #[derive(Debug, Eq, PartialEq)]
-struct HuffmanNode {
-    node: Node,
-    frequency: usize
+pub struct HuffmanNode {
+    pub node: Node,
+    pub frequency: usize
 }
 
 impl Ord for HuffmanNode {
@@ -27,7 +27,7 @@ impl PartialOrd for HuffmanNode {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct BitCode {
+pub struct BitCode {
     bits: u32,
     length: u32,
 }
@@ -38,7 +38,7 @@ impl fmt::Display for BitCode {
     }
 }
 
-fn build_tree(frequencies: &[(u8, usize)]) -> Option<HuffmanNode> {
+pub fn build_tree(frequencies: &[(u8, usize)]) -> Option<HuffmanNode> {
     if frequencies.is_empty() { return None; }
 
     // Fill the tree with leaves
@@ -69,7 +69,7 @@ fn build_tree(frequencies: &[(u8, usize)]) -> Option<HuffmanNode> {
     heap.pop()
 }
 
-fn build_table(node: &Node, current_bits: u32, current_length: u32, table: &mut HashMap<u8, BitCode>) {
+pub fn build_table(node: &Node, current_bits: u32, current_length: u32, table: &mut HashMap<u8, BitCode>) {
     match node {
         Node::Leaf(ch) => {
             table.insert(
@@ -84,7 +84,7 @@ fn build_table(node: &Node, current_bits: u32, current_length: u32, table: &mut 
     }
 }
 
-fn compute_frequencies(message: &[u8]) -> Vec<(u8, usize)> {
+pub fn compute_frequencies(message: &[u8]) -> Vec<(u8, usize)> {
     let mut frequencies = [0; 256];
 
     for &ch in message {
@@ -99,7 +99,7 @@ fn compute_frequencies(message: &[u8]) -> Vec<(u8, usize)> {
         .collect()
 }
 
-fn encode(data: &[u8], table: &HashMap<u8, BitCode>) -> (Vec<u8>, usize) {
+pub fn encode(data: &[u8], table: &HashMap<u8, BitCode>) -> (Vec<u8>, usize) {
     let mut encoded_bytes = Vec::with_capacity(data.len() / 2);
 
     let mut bit_accumulator: u64 = 0;
@@ -131,6 +131,42 @@ fn encode(data: &[u8], table: &HashMap<u8, BitCode>) -> (Vec<u8>, usize) {
     }
 
     (encoded_bytes, total_bits)
+}
+
+pub fn decode(bytes: &[u8], bit_count: usize, root: &HuffmanNode) -> Vec<u8> {
+    let mut data = Vec::new();
+
+    if bit_count == 0 { return data; }
+
+    if let Node::Leaf(ch) = &root.node {
+        return vec![*ch; root.frequency];
+    }
+
+    let mut current_node = &root.node;
+    let mut bits_processed = 0;
+
+    for &byte in bytes {
+        for i in (0..8).rev() {
+            if bits_processed >= bit_count { break; }
+
+            let bit = (byte >> i) & 1;
+            bits_processed += 1;
+
+            match current_node {
+                Node::Internal(left, right) => {
+                    current_node = if bit == 1 { &left.node } else { &right.node };
+                }
+                Node::Leaf(_) => { }
+            }
+
+            if let Node::Leaf(ch) = current_node {
+                data.push(*ch);
+                current_node = &root.node;
+            }
+        }
+    }
+
+    data
 }
 
 #[cfg(test)]
@@ -210,7 +246,7 @@ mod tests {
         let mut table = HashMap::new();
         build_table(&root.node, 0, 0, &mut table);
 
-        let (encoded_bytes, total_bits) = encode(&message, &table);
+        let (encoded_bytes, _total_bits) = encode(&message, &table);
 
         let encoded_str = encoded_bytes
             .iter()
@@ -219,5 +255,24 @@ mod tests {
             .join(", ");
 
         println!("{}", encoded_str);
+    }
+
+    #[test]
+    fn test_encode_decode() {
+        let message = get_message();
+        let freqs = compute_frequencies(&message);
+
+        let root_opt = build_tree(&freqs);
+        assert!(root_opt.is_some());
+
+        let root = root_opt.unwrap();
+
+        let mut table = HashMap::new();
+        build_table(&root.node, 0, 0, &mut table);
+
+        let (encoded_bytes, total_bits) = encode(&message, &table);
+        let decoded_message = decode(&encoded_bytes, total_bits, &root);
+
+        assert_eq!(message, decoded_message);
     }
 }
